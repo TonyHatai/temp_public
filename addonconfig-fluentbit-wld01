@@ -1,0 +1,266 @@
+apiVersion: addons.kubernetes.vmware.com/v1alpha1
+kind: AddonConfig
+metadata:
+  annotations:
+    clusteraddon.addons.kubernetes.vmware.com/owned-for-deletion: "true"
+  labels:
+    addon.kubernetes.vmware.com/addon-name: ako
+    cluster.x-k8s.io/cluster-name: vks-wld01
+  name: vks-wld01-fluent-bit
+  namespace: vks
+spec:
+  addonConfigDefinitionRef:
+    name: ako.kubernetes.vmware.com.1.13.4---vmware.1-vks.1 
+    namespace: vmware-system-vks-public
+  clusterName: vks-wld01 
+  values:
+    namespace: "tanzu-system-logging"
+    fluent_bit:
+      pspNames: ["vmware-system-privileged"]
+      # >>> CHANGE_ME：未來 ab-workload / ga-workload 只改這個值
+      daemonset:
+        env:
+          - name: WORKLOAD_NAME
+            value: "nn_workload"
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1000Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        podAnnotations: {}
+        podLabels: {}
+
+      config:
+        service: |
+          [SERVICE]
+            Flush        1
+            Log_Level    info
+            Daemon       off
+            Parsers_File parsers.conf
+            HTTP_Server  On
+            HTTP_Listen  0.0.0.0
+            HTTP_Port    2020
+
+        inputs: |
+          [INPUT]
+            Name            tail
+            Path            /var/log/containers/*.log
+            Exclude_Path    /var/log/containers/eventrouter*.log
+            Tag             kube.sys_infra.container.*
+            Parser          cri
+            DB              /var/log/flb_container.db
+            Mem_Buf_Limit   20MB
+            Skip_Long_Lines On
+
+          [INPUT]
+            Name            tail
+            Path            /var/log/containers/eventrouter*.log
+            Tag             kube.sys_infra.event.*
+            Parser          cri
+            DB              /var/log/flb_event.db
+            Mem_Buf_Limit   20MB
+            Skip_Long_Lines On
+
+          [INPUT]
+            Name              tail
+            Tag               apiserver_audit.*
+            Path              /var/log/kubernetes/kube-apiserver.log
+            DB                /var/log/flb_kube_audit.db
+            Mem_Buf_Limit     200MB
+            Refresh_Interval  10
+            Buffer_Chunk_Size 512k
+            Buffer_Max_Size   2M
+            Skip_Long_Lines   On
+
+          [INPUT]
+            Name            tail
+            Tag             sys_audit.*
+            Path            /var/log/audit/audit.log
+            DB              /var/log/flb_sys_audit.db
+            Mem_Buf_Limit   50MB
+            Refresh_Interval 10
+            Skip_Long_Lines On
+
+        filters: |
+          [FILTER]
+            Name            kubernetes
+            Match           kube.sys_infra.container.*
+            Kube_Tag_Prefix kube.sys_infra.container.var.log.containers.
+            Merge_Log       On
+            Merge_Log_Key   log_processed
+            Keep_Log        On
+            K8S-Logging.Parser  On
+            K8S-Logging.Exclude On
+
+          [FILTER]
+            Name            kubernetes
+            Match           kube.sys_infra.event.*
+            Kube_Tag_Prefix kube.sys_infra.event.var.log.containers.
+            Merge_Log       Off
+            Keep_Log        On
+
+          [FILTER]
+            Name         nest
+            Match        kube.sys_infra.*
+            Operation    lift
+            Nested_under kubernetes
+            Add_prefix   k8s_
+
+          [FILTER]
+            Name   grep
+            Match  apiserver_audit.*
+            Regex  log ^\{
+
+          [FILTER]
+            Name         parser
+            Match        apiserver_audit.*
+            Key_Name     log
+            Parser       audit_json_parser
+            Reserve_Data On
+            Preserve_Key On
+
+          [FILTER]
+            Name         nest
+            Match        apiserver_audit.*
+            Operation    lift
+            Nested_under user
+            Add_prefix   user_
+
+          [FILTER]
+            Name         nest
+            Match        apiserver_audit.*
+            Operation    lift
+            Nested_under objectRef
+            Add_prefix   obj_
+
+          [FILTER]
+            Name         nest
+            Match        apiserver_audit.*
+            Operation    lift
+            Nested_under responseStatus
+            Add_prefix   rsp_
+
+          [FILTER]
+            Name   modify
+            Match  apiserver_audit.*
+            Rename log text
+          
+          [FILTER]
+            Name         nest
+            Match        apiserver_audit.*
+            Operation    nest
+            Wildcard     user_*
+            Nest_under   li
+          
+          [FILTER]
+            Name         nest
+            Match        apiserver_audit.*
+            Operation    nest
+            Wildcard     obj_*
+            Nested_under li
+
+          [FILTER]
+            Name         nest
+            Match        apiserver_audit.*
+            Operation    nest
+            Wildcard     rsp_*
+            Nested_under li
+
+          [FILTER]
+            Name   record_modifier
+            Match  kube.sys_infra.container.*
+            Record syslog_host ${WORKLOAD_NAME}_infra_container
+
+          [FILTER]
+            Name   record_modifier
+            Match  kube.sys_infra.event.*
+            Record syslog_host ${WORKLOAD_NAME}_event
+
+          [FILTER]
+            Name   record_modifier
+            Match  sys_audit.*
+            Record syslog_host ${WORKLOAD_NAME}_sys_audit
+
+          [FILTER]
+            Name   record_modifier
+            Match  apiserver_audit.*
+            Record syslog_host ${WORKLOAD_NAME}_api_audit
+
+        outputs: |
+          [OUTPUT]
+            Name                  syslog
+            Match                 kube.sys_infra.container.*
+            Host                  10.253.26.208
+            Port                  514
+            Mode                  tcp
+            syslog_format         rfc5424
+            syslog_maxsize        8192
+            syslog_hostname_key   syslog_host
+            syslog_hostname_preset ${WORKLOAD_NAME}_infra_container
+            syslog_appname_key    k8s_pod_name
+            syslog_appname_preset kube-container
+            syslog_procid_key     k8s_container_name
+            syslog_message_key    log
+
+          [OUTPUT]
+            Name                  syslog
+            Match                 kube.sys_infra.event.*
+            Host                  10.253.26.208
+            Port                  514
+            Mode                  tcp
+            syslog_format         rfc5424
+            syslog_maxsize        8192
+            syslog_hostname_key   syslog_host
+            syslog_hostname_preset ${WORKLOAD_NAME}_infra_event
+            syslog_appname_key    k8s_pod_name
+            syslog_appname_preset kube-event
+            syslog_procid_key     k8s_container_name
+            syslog_message_key    log
+
+          [OUTPUT]
+            Name                  syslog
+            Match                 sys_audit.*
+            Host                  10.253.26.208
+            Port                  514
+            Mode                  tcp
+            syslog_format         rfc5424
+            syslog_maxsize        8192
+            syslog_hostname_key   syslog_host
+            syslog_hostname_preset ${WORKLOAD_NAME}_infra_sys_audit
+            syslog_appname_preset auditd
+            syslog_message_key    log
+
+          [OUTPUT]
+            Name                  syslog
+            Match                 apiserver_audit.*
+            Host                  10.253.26.208
+            Port                  514
+            Mode                  tcp
+            syslog_format         rfc5424
+            syslog_maxsize        8192
+            syslog_hostname_key   syslog_host
+            syslog_hostname_preset ${WORKLOAD_NAME}_infra_api_audit
+            syslog_appname_preset kube-apiserver
+            syslog_message_key    text
+            syslog_sd_key         li
+      
+        parsers: |
+          [PARSER]
+            Name        audit_json_parser
+            Format      json
+            Time_Key    requestReceivedTimestamp
+            Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+
+          [PARSER]
+            Name        cri
+            Format      regex
+            Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+            Time_Key    time
+            Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+
+        streams: |
+          [STREAM_TASK]
+            Name cpu_test
+            Exec CREATE STREAM cpu WITH (tag='results') AS SELECT AVG(cpu_p) FROM STREAM:cpu_data WINDOW TUMBLING (5 SECOND);
