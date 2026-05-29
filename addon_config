@@ -1,0 +1,90 @@
+apiVersion: addons.kubernetes.vmware.com/v1alpha1
+kind: AddonConfig
+metadata:
+  annotations:
+    clusteraddon.addons.kubernetes.vmware.com/owned-for-deletion: "true"
+  labels:
+    addon.kubernetes.vmware.com/addon-name: fluent-bit
+    cluster.x-k8s.io/cluster-name: ${CLUSTER}
+  name: ${CLUSTER}-fluent-bit
+  namespace: ${NAMESPACE}
+spec:
+  addonConfigDefinitionRef:
+    name: fluent-bit.kubernetes.vmware.com.4.0.8-vmware.1-vks.1
+    namespace: vmware-system-vks-public
+  clusterName: ${CLUSTER}
+  values:
+    namespace: "tanzu-system-logging"
+    fluent_bit:
+      pspNames: ["vmware-system-privileged"]
+      config:
+        service: |
+          [Service]
+            Flush                 1
+            Log_Level             info
+            Daemon                off
+            Parsers_File          parsers.conf
+            HTTP_Server           On
+            HTTP_Listen           0.0.0.0
+            HTTP_Port             2020
+        outputs: |
+          [OUTPUT]
+            Name  http
+            Match apiserver_audit.*
+            Host            10.2.1.121
+            Port            9543
+            URI             /api/v2/logs/ingest
+            Format          json
+            TLS             On
+            TLS.Verify      Off
+        inputs: |
+          [INPUT]
+            Name                  tail
+            Tag                   apiserver_audit.*
+            Path                  /var/log/kubernetes/kube-apiserver.log
+            Parser                json
+            DB                    /var/log/flb_kube_audit.db
+            Mem_Buf_Limit         50MB
+            Refresh_Interval      10
+            Buffer_Chunk_Size     128k
+            Buffer_Max_Size       12800k
+
+        filters: |
+          [FILTER]
+            Name record_modifier
+            Match           apiserver_audit.*
+            Record             log_type k8s_audit_log
+
+        parsers: |
+          [PARSER]
+            Name                  json
+            Format                json
+            Time_Key              time
+          [PARSER]
+            Name                  docker
+            Format                json
+            Time_Key              time
+            Time_Format           %Y-%m-%dT%H:%M:%S %z
+          [PARSER]
+            Name                  cri
+            Format                regex
+            Regex                 ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<logtypeid>[^ ]*) (?<containerTime>[^ ]*) +(?<scriptId>[^ ]*) (?<scriptInfo>[^ ]*) (?<message>.*)$
+            Time_Key              time
+            Time_Format           %Y-%m-%dT%H:%M:%S.%L%z
+        streams: |
+          [STREAM_TASK]
+              Name   cpu_test
+              Exec   CREATE STREAM cpu WITH (tag='results') AS SELECT AVG(cpu_p) from STREAM:cpu_data WINDOW TUMBLING (5 SECOND);
+
+      #! optional configuration for the daemonset
+      daemonset:
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1000Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        podAnnotations: {}
+        podLabels: {}
+        env: []
